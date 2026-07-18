@@ -21,9 +21,8 @@ import (
 //	readLoop receives 0x93 → handleAuthResp → markAuth(authID, token)
 //	            → close(done) → ensureToken returns token
 //
-// Bidirectional mapping (key ↔ authID) allows the async response
-// handler to find the correct flow entry by the server-returned
-// conntrackHash.
+// The authID mapping allows the async response handler to find the flow entry
+// identified by the server-returned conntrackHash.
 type conntrackMgr struct {
 	mu      sync.Mutex
 	entries map[string]*conntrackEntry
@@ -35,16 +34,14 @@ type conntrackMgr struct {
 	// DoAuth sends the per-flow auth request frame on the given conn.
 	// It must NOT block — the caller (ensureToken) handles waiting.
 	// Set by the L3 tunnel during initialization.
-	DoAuth func(c *conn, key string, authID uint64,
+	DoAuth func(c *conn, authID uint64,
 		srcIP net.IP, srcPort uint16,
 		dstIP net.IP, dstPort uint16,
 		proto uint8, appID string) error
 }
 
 type conntrackEntry struct {
-	key    string
 	authID uint64
-	appID  string
 	token  string
 	err    error
 	done   chan struct{}
@@ -85,9 +82,7 @@ func (m *conntrackMgr) ensureToken(
 	if !exists {
 		authID := atomic.AddUint64(&m.nextAuthID, 1)
 		entry = &conntrackEntry{
-			key:    key,
 			authID: authID,
-			appID:  appID,
 			done:   make(chan struct{}),
 		}
 		m.entries[key] = entry
@@ -103,7 +98,7 @@ func (m *conntrackMgr) ensureToken(
 	// First caller: send auth request then wait for async response.
 	if entry.started.CompareAndSwap(false, true) {
 		if m.DoAuth != nil {
-			if err := m.DoAuth(c, key, entry.authID,
+			if err := m.DoAuth(c, entry.authID,
 				srcIP, srcPort, dstIP, dstPort, proto, appID); err != nil {
 				// Send failed — mark immediately.
 				entry.err = fmt.Errorf("per-flow auth send: %w", err)

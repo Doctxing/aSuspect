@@ -27,10 +27,7 @@ type SessionStore struct {
 }
 
 func (s *SessionStore) LiveClient() *http.Client {
-	return &http.Client{
-		Transport: shared.NewTransport(),
-		Jar:       s.LiveJar,
-	}
+	return shared.NewHTTPClient(s.LiveJar)
 }
 
 func (s *SessionStore) NewClient() (*http.Client, error) {
@@ -38,10 +35,7 @@ func (s *SessionStore) NewClient() (*http.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &http.Client{
-		Transport: shared.NewTransport(),
-		Jar:       jar,
-	}, nil
+	return shared.NewHTTPClient(jar), nil
 }
 
 func (s *SessionStore) Save() error {
@@ -97,7 +91,6 @@ func (s *SessionStore) UpdateCookies(jar *cookiejar.Jar) {
 	s.Cookies = make([]shared.CookieJSON, len(cookies))
 	for i, c := range cookies {
 		s.Cookies[i] = shared.CookieJSON{
-			Host: s.Server, Scheme: "https",
 			Name: c.Name, Value: c.Value,
 		}
 	}

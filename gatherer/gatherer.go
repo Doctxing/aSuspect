@@ -43,8 +43,6 @@ func (g *InfoGatherer) Gather() (*shared.SharedState, error) {
 	state.SignKey = g.Session.SignKey
 	state.ConnectionID = connectionID
 	state.Username = g.Session.Username
-	state.ServerAddress = g.Server
-	state.ServerPort = g.Port
 	state.AntiMITM = g.Session.AntiMITM
 
 	if err := g.parseResource(resourceJSON, state); err != nil {

@@ -68,10 +68,8 @@ func (r DomainResource) Matches(proto Protocol, port int) bool {
 
 // CookieJSON is used for serializing HTTP cookies.
 type CookieJSON struct {
-	Host   string `json:"host"`
-	Scheme string `json:"scheme"`
-	Name   string `json:"name"`
-	Value  string `json:"value"`
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // ── Anti-MITM ────────────────────────────────────────────────────────────────

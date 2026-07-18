@@ -82,7 +82,7 @@ func newTunnel(sid, deviceID, connectionID, username, signKeyHex string) (*tunne
 	// Wire up per-flow auth — DoAuth sends the frame on the active conn
 	// and returns immediately; the async response is handled by
 	// readLoop → handleAuthResp → markAuth.
-	t.conntrack.DoAuth = func(c *conn, key string, authID uint64,
+	t.conntrack.DoAuth = func(c *conn, authID uint64,
 		srcIP net.IP, srcPort uint16,
 		dstIP net.IP, dstPort uint16,
 		proto uint8, appID string,

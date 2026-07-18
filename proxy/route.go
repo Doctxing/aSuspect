@@ -32,9 +32,6 @@ func newRouter(
 	gs l3tun.Stack,
 	tcpMode string,
 ) *router {
-	if tcpMode == "" {
-		tcpMode = "l4"
-	}
 	return &router{
 		state:   state,
 		l4T:     l4t,
@@ -49,9 +46,9 @@ func newRouter(
 func (r *router) dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	switch network {
 	case "tcp":
-		return r.dialTCP(ctx, network, addr)
+		return r.dialTCP(ctx, addr)
 	case "udp":
-		return r.dialUDP(ctx, network, addr)
+		return r.dialUDP(addr)
 	default:
 		return nil, fmt.Errorf("unsupported network: %s", network)
 	}
@@ -65,7 +62,7 @@ func (r *router) dial(ctx context.Context, network, addr string) (net.Conn, erro
 //  2. No match → drop
 //  3. VPN + tcpMode=l4 → L4 TCP Tunnel (dedicated TLS per connection)
 //  4. VPN + tcpMode=l3 → gVisor stack → L3 Tunnel
-func (r *router) dialTCP(ctx context.Context, network, addr string) (net.Conn, error) {
+func (r *router) dialTCP(ctx context.Context, addr string) (net.Conn, error) {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
@@ -80,12 +77,6 @@ func (r *router) dialTCP(ctx context.Context, network, addr string) (net.Conn, e
 	if domain == "" && targetIP == nil {
 		domain = host
 	}
-	if targetIP == nil {
-		// Domain not resolved yet — the SOCKS5 resolver should have
-		// already done DNS.  If targetIP is nil here, it means
-		// the resolver didn't resolve (direct connection case).
-	}
-
 	snap := r.state.Snapshot()
 
 	// ── Resource matching ────────────────────────────────────────────
@@ -152,7 +143,7 @@ func (r *router) dialTCP(ctx context.Context, network, addr string) (net.Conn, e
 }
 
 // dialUDP creates a UDP connection through gVisor stack → L3 tunnel.
-func (r *router) dialUDP(ctx context.Context, network, addr string) (net.Conn, error) {
+func (r *router) dialUDP(addr string) (net.Conn, error) {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
@@ -170,7 +161,7 @@ func (r *router) dialUDP(ctx context.Context, network, addr string) (net.Conn, e
 	// Match resource for routing.
 	snap := r.state.Snapshot()
 	if snap.FindIPResource(targetIP, shared.ProtoUDP, port) != nil {
-		return r.gstack.DialUDPConn(
+		return r.gstack.DialUDP(
 			nil,
 			&net.UDPAddr{IP: targetIP, Port: port},
 		)

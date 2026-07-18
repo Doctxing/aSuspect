@@ -121,7 +121,10 @@ func (s *Session) completeRedirectAuth(callbackURL string) error {
 	}
 	defer func() { s.client.CheckRedirect = originalCheckRedirect }()
 
-	req, _ := http.NewRequest("GET", callbackURL, nil)
+	req, err := http.NewRequest("GET", callbackURL, nil)
+	if err != nil {
+		return fmt.Errorf("create callback request: %w", err)
+	}
 	req.Header.Set("User-Agent", shared.UserAgent)
 	req.Header.Set("x-csrf-token", s.csrfToken)
 	req.Header.Set("x-sdp-traceid", randSdpID())
@@ -130,12 +133,14 @@ func (s *Session) completeRedirectAuth(callbackURL string) error {
 	if err != nil {
 		return err
 	}
+	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		return fmt.Errorf("read callback response: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusFound {
-		return fmt.Errorf("expected 302, got %d, body: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("expected 302, got %d", resp.StatusCode)
 	}
 
 	ticket, err := parsePortalTicket(resp.Header.Get("Location"))
@@ -155,7 +160,7 @@ func parsePortalTicket(location string) (string, error) {
 
 	data := u.Query().Get("data")
 	if data == "" {
-		return "", fmt.Errorf("no data param in %s", location)
+		return "", fmt.Errorf("redirect location has no data parameter")
 	}
 
 	var v struct {
@@ -165,7 +170,7 @@ func parsePortalTicket(location string) (string, error) {
 		return "", fmt.Errorf("parse json: %w", err)
 	}
 	if v.Ticket == "" {
-		return "", fmt.Errorf("empty ticket in data: %s", data)
+		return "", fmt.Errorf("redirect data contains an empty ticket")
 	}
 
 	return v.Ticket, nil

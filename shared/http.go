@@ -5,11 +5,12 @@ import (
 	"net/http"
 )
 
-// NewTransport returns an http.Transport configured for aTrust servers
-// (TLS with InsecureSkipVerify). Callers are responsible for attaching
-// their own CookieJar or other client-level configuration.
-func NewTransport() *http.Transport {
-	return &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+// NewHTTPClient returns a client with the existing aTrust transport settings.
+func NewHTTPClient(jar http.CookieJar) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+		Jar: jar,
 	}
 }

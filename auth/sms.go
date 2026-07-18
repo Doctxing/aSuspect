@@ -3,7 +3,6 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -69,21 +68,13 @@ func (s *Session) sendSms(phone, loginDomain, graphCheckCode string) (int, error
 	req.Header.Set("x-sdp-env", s.env)
 	req.Header.Set("x-sdp-traceid", randSdpID())
 
-	resp, err := s.client.Do(req)
+	type responseData struct {
+		GraphCheckCodeEnable int `json:"graphCheckCodeEnable"`
+	}
+	v, err := doAPI[responseData](s.client, req)
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var v struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			GraphCheckCodeEnable int `json:"graphCheckCodeEnable"`
-		} `json:"data"`
-	}
-	json.Unmarshal(body, &v)
 	if v.Code != 0 {
 		return 0, fmt.Errorf("sendSms: code=%d %s", v.Code, v.Message)
 	}
@@ -110,23 +101,13 @@ func (s *Session) smsCheckCode(code, phone, loginDomain, graphCheckCode string) 
 	req.Header.Set("x-sdp-env", s.env)
 	req.Header.Set("x-sdp-traceid", randSdpID())
 
-	resp, err := s.client.Do(req)
+	type responseData struct {
+		Ticket               string `json:"ticket"`
+		GraphCheckCodeEnable int    `json:"graphCheckCodeEnable"`
+	}
+	v, err := doAPI[responseData](s.client, req)
 	if err != nil {
 		return 0, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var v struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Ticket               string `json:"ticket"`
-			GraphCheckCodeEnable int    `json:"graphCheckCodeEnable"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &v); err != nil {
-		return 0, fmt.Errorf("parse smsCheckCode response: %w", err)
 	}
 	if v.Code != 0 {
 		return 0, fmt.Errorf("smsCheckCode: code=%d %s", v.Code, v.Message)

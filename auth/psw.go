@@ -74,24 +74,13 @@ func (s *Session) loginPsw(username, password, loginDomain, graphCheckCode strin
 	req.Header.Set("x-sdp-env", s.env)
 	req.Header.Set("x-sdp-traceid", randSdpID())
 
-	resp, err := s.client.Do(req)
+	type responseData struct {
+		Ticket               string `json:"ticket"`
+		GraphCheckCodeEnable int    `json:"graphCheckCodeEnable"`
+	}
+	v, err := doAPI[responseData](s.client, req)
 	if err != nil {
 		return 0, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	var v struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Ticket               string `json:"ticket"`
-			GraphCheckCodeEnable int    `json:"graphCheckCodeEnable"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &v); err != nil {
-		return 0, fmt.Errorf("parse psw response: %w", err)
 	}
 	if v.Code != 0 {
 		return 0, fmt.Errorf("password login: code=%d %s", v.Code, v.Message)
@@ -165,7 +154,10 @@ func (s *Session) fetchCaptcha() ([]byte, error) {
 		"rnd": {strconv.FormatInt(time.Now().UnixMilli(), 10)},
 	})
 	u := fmt.Sprintf("%s/passport/v1/public/checkCode?%s", s.baseURL(), params.Encode())
-	req, _ := http.NewRequest("GET", u, nil)
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create captcha request: %w", err)
+	}
 	req.Header.Set("User-Agent", shared.UserAgent)
 	req.Header.Set("Accept", "image/webp,image/apng,image/*,*/*;q=0.8")
 
@@ -177,68 +169,65 @@ func (s *Session) fetchCaptcha() ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
+type captchaPayload struct {
+	Coordinates [][]int `json:"coordinates"`
+	Height      int     `json:"height"`
+	Width       int     `json:"width"`
+}
+
 func canonicalCaptcha(rawInput string, imgData []byte) (string, error) {
 	rawInput = strings.TrimSpace(rawInput)
 
-	// Accept three formats:
-	// 1. {"coordinates": [[x,y],...], "width": W, "height": H}
-	// 2. [{"x":X, "y":Y}, ...]
-	// 3. [[x,y], ...]
-
-	var obj map[string]interface{}
-	if json.Unmarshal([]byte(rawInput), &obj) == nil {
-		if _, ok := obj["coordinates"]; ok {
-			b, _ := json.Marshal(obj)
-			return string(b), nil
+	var payload captchaPayload
+	if err := json.Unmarshal([]byte(rawInput), &payload); err == nil && len(payload.Coordinates) > 0 {
+		if payload.Width <= 0 || payload.Height <= 0 {
+			return "", fmt.Errorf("captcha dimensions must be positive")
 		}
+		return marshalCaptcha(payload, imgData)
 	}
 
-	var arr []interface{}
-	if json.Unmarshal([]byte(rawInput), &arr) == nil && len(arr) > 0 {
+	var points []struct {
+		X *int `json:"x"`
+		Y *int `json:"y"`
+	}
+	if err := json.Unmarshal([]byte(rawInput), &points); err == nil && len(points) > 0 {
+		payload.Coordinates = make([][]int, len(points))
+		for i, point := range points {
+			if point.X == nil || point.Y == nil {
+				return "", fmt.Errorf("captcha point %d requires x and y", i)
+			}
+			payload.Coordinates[i] = []int{*point.X, *point.Y}
+		}
+		return marshalCaptcha(payload, imgData)
+	}
+
+	var coordinates [][]int
+	if err := json.Unmarshal([]byte(rawInput), &coordinates); err == nil && len(coordinates) > 0 {
+		payload.Coordinates = coordinates
+		return marshalCaptcha(payload, imgData)
+	}
+
+	return "", fmt.Errorf("unrecognized captcha format: %s", rawInput)
+}
+
+func marshalCaptcha(payload captchaPayload, imgData []byte) (string, error) {
+	for _, pair := range payload.Coordinates {
+		if len(pair) != 2 || pair[0] < 0 || pair[1] < 0 {
+			return "", fmt.Errorf("captcha coordinates must be non-negative [x,y] pairs")
+		}
+	}
+	if payload.Width == 0 || payload.Height == 0 {
 		w, h, err := decodeImageSize(imgData)
 		if err != nil {
 			return "", fmt.Errorf("captcha image: %w", err)
 		}
-		switch arr[0].(type) {
-		case map[string]interface{}:
-			// Format 2: [{"x":X, "y":Y}, ...]
-			coords := make([][]int, 0, len(arr))
-			for _, item := range arr {
-				m := item.(map[string]interface{})
-				coords = append(coords, []int{
-					int(m["x"].(float64)),
-					int(m["y"].(float64)),
-				})
-			}
-			result := map[string]interface{}{
-				"coordinates": coords,
-				"width":       w,
-				"height":      h,
-			}
-			b, _ := json.Marshal(result)
-			return string(b), nil
-
-		case []interface{}:
-			// Format 3: [[x,y], ...]
-			coords := make([][]int, 0, len(arr))
-			for _, item := range arr {
-				pair := item.([]interface{})
-				coords = append(coords, []int{
-					int(pair[0].(float64)),
-					int(pair[1].(float64)),
-				})
-			}
-			result := map[string]interface{}{
-				"coordinates": coords,
-				"width":       w,
-				"height":      h,
-			}
-			b, _ := json.Marshal(result)
-			return string(b), nil
-		}
+		payload.Width, payload.Height = w, h
 	}
-
-	return "", fmt.Errorf("unrecognized captcha format: %s", rawInput)
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("encode captcha: %w", err)
+	}
+	return string(b), nil
 }
 
 // decodeImageSize returns the width and height of an image (JPEG, PNG, GIF).

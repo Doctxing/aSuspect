@@ -77,7 +77,7 @@ func (r *resolver) resolveViaGVisor(domain string, dnsServer net.IP) (net.IP, er
 
 	// Dial UDP to DNS server through gVisor stack.
 	// gVisor handles UDP source port allocation and packet framing.
-	conn, err := r.gstack.DialUDPConn(
+	conn, err := r.gstack.DialUDP(
 		nil, // let gVisor pick source
 		&net.UDPAddr{IP: dnsServer, Port: 53},
 	)

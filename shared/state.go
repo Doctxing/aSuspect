@@ -30,9 +30,6 @@ type SharedState struct {
 	// SPA anti-MITM data from authConfig.
 	AntiMITM *AntiMITMData
 
-	ServerAddress string
-	ServerPort    int
-
 	mu sync.RWMutex
 }
 
@@ -83,9 +80,8 @@ func (s *SharedState) Snapshot() SharedState {
 		VirtualIP:   copyIP(s.VirtualIP),
 		IPResources: s.IPResources, DomainResources: s.DomainResources,
 		StaticHosts: s.StaticHosts, DNSServer: copyIP(s.DNSServer),
-		NodePool:      s.NodePool,
-		MajorGroupID:  s.MajorGroupID,
-		AntiMITM:      s.AntiMITM,
-		ServerAddress: s.ServerAddress, ServerPort: s.ServerPort,
+		NodePool:     s.NodePool,
+		MajorGroupID: s.MajorGroupID,
+		AntiMITM:     s.AntiMITM,
 	}
 }

@@ -7,9 +7,7 @@ package auth
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 
@@ -22,8 +20,6 @@ type AuthMethod struct {
 	AuthName    string `json:"authName"`
 	LoginDomain string `json:"loginDomain"`
 	LoginURL    string `json:"loginUrl"`
-	AuthID      string `json:"authId"`
-	SubType     string `json:"subType"`
 }
 
 // Authenticator performs a login step on a Session.
@@ -33,9 +29,7 @@ type Authenticator interface {
 
 // FetchAuthMethods queries the server for supported auth methods.
 func FetchAuthMethods(server string, port int) ([]AuthMethod, error) {
-	client := &http.Client{
-		Transport: shared.NewTransport(),
-	}
+	client := shared.NewHTTPClient(nil)
 
 	q := url.Values{
 		"clientType": {"SDPClient"},
@@ -52,26 +46,15 @@ func FetchAuthMethods(server string, port int) ([]AuthMethod, error) {
 	req.Header.Set("User-Agent", shared.UserAgent)
 	req.Header.Set("x-sdp-rid", base64.StdEncoding.EncodeToString([]byte(server)))
 
-	resp, err := client.Do(req)
+	type responseData struct {
+		AuthServerInfoList []AuthMethod `json:"authServerInfoList"`
+	}
+	v, err := doAPI[responseData](client, req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	var v struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			AuthServerInfoList []AuthMethod `json:"authServerInfoList"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &v); err != nil {
-		return nil, fmt.Errorf("parse auth config: %w\nraw: %s", err, body)
-	}
 	if v.Code != 0 {
-		return nil, fmt.Errorf("server returned code=%d: %s\nraw: %s", v.Code, v.Message, body)
+		return nil, fmt.Errorf("server returned code=%d: %s", v.Code, v.Message)
 	}
 	return v.Data.AuthServerInfoList, nil
 }

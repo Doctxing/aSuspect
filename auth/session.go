@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -48,7 +47,6 @@ type AuthConfigResponse struct {
 	IsLogin            int          `json:"isLogin"`
 	AuthServerInfoList []AuthMethod `json:"authServerInfoList"`
 	FirstAuth          []string     `json:"firstAuth"`
-	Domains            []string     `json:"domains"`
 	Security           struct {
 		CSRFToken string `json:"csrfToken"`
 	} `json:"security"`
@@ -85,9 +83,8 @@ func NewSession(server string, port int, deviceID string) *Session {
 		deviceID = shared.RandHex(32)
 	}
 
-	tr := shared.NewTransport()
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Transport: tr, Jar: jar}
+	client := shared.NewHTTPClient(jar)
 
 	rid := base64.StdEncoding.EncodeToString([]byte(server))
 	env := base64.StdEncoding.EncodeToString([]byte(`{"deviceId":"` + deviceID + `"}`))
@@ -127,21 +124,9 @@ func (s *Session) FetchAuthConfig() (*AuthConfigResponse, error) {
 	req.Header.Set("x-sdp-rid", s.rid)
 	req.Header.Set("x-sdp-traceid", randSdpID())
 
-	resp, err := s.client.Do(req)
+	v, err := doAPI[AuthConfigResponse](s.client, req)
 	if err != nil {
 		return nil, fmt.Errorf("authConfig: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	var v struct {
-		Code    int                `json:"code"`
-		Message string             `json:"message"`
-		Data    AuthConfigResponse `json:"data"`
-	}
-	if err := json.Unmarshal(body, &v); err != nil {
-		return nil, fmt.Errorf("parse authConfig: %w\nraw: %s", err, body)
 	}
 	if v.Code != 0 {
 		return nil, fmt.Errorf("authConfig code=%d: %s", v.Code, v.Message)
@@ -170,23 +155,13 @@ func (s *Session) fetchAuthConfigMod() error {
 	req.Header.Set("x-sdp-rid", s.rid)
 	req.Header.Set("x-sdp-traceid", randSdpID())
 
-	resp, err := s.client.Do(req)
+	type responseData struct {
+		AuthConfigResponse
+		CSRFToken string `json:"csrfToken"`
+	}
+	v, err := doAPI[responseData](s.client, req)
 	if err != nil {
 		return fmt.Errorf("authConfigMod: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var v struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			AuthConfigResponse
-			CSRFToken string `json:"csrfToken"` // flat version
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &v); err != nil {
-		return fmt.Errorf("parse: %w", err)
 	}
 	if v.Code != 0 {
 		return fmt.Errorf("code=%d: %s", v.Code, v.Message)
@@ -226,19 +201,10 @@ func (s *Session) ReportEnv() error {
 	req.Header.Set("x-csrf-token", s.csrfToken)
 	req.Header.Set("x-sdp-traceid", randSdpID())
 
-	resp, err := s.client.Do(req)
+	v, err := doAPI[struct{}](s.client, req)
 	if err != nil {
 		return fmt.Errorf("reportEnv: %w", err)
 	}
-
-	rbody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	var v struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	}
-	json.Unmarshal(rbody, &v)
 	if v.Code != 0 {
 		return fmt.Errorf("reportEnv: code=%d %s", v.Code, v.Message)
 	}
@@ -255,21 +221,18 @@ func (s *Session) AuthCheck() (string, error) {
 	req.Header.Set("x-csrf-token", s.csrfToken)
 	req.Header.Set("x-sdp-traceid", randSdpID())
 
-	resp, err := s.client.Do(req)
+	type responseData struct {
+		NextServiceList []struct {
+			AuthID string `json:"authId"`
+		} `json:"nextServiceList"`
+	}
+	v, err := doAPI[responseData](s.client, req)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var v struct {
-		Data struct {
-			NextServiceList []struct {
-				AuthID string `json:"authId"`
-			} `json:"nextServiceList"`
-		} `json:"data"`
+	if v.Code != 0 {
+		return "", fmt.Errorf("authCheck: code=%d %s", v.Code, v.Message)
 	}
-	json.Unmarshal(body, &v)
 	if len(v.Data.NextServiceList) > 0 {
 		return v.Data.NextServiceList[0].AuthID, nil
 	}
@@ -290,21 +253,13 @@ func (s *Session) AuthSms(authID string) error {
 	req.Header.Set("x-csrf-token", s.csrfToken)
 	req.Header.Set("x-sdp-traceid", randSdpID())
 
-	resp, err := s.client.Do(req)
+	type responseData struct {
+		Tips string `json:"tips"`
+	}
+	v, err := doAPI[responseData](s.client, req)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var v struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Tips string `json:"tips"`
-		} `json:"data"`
-	}
-	json.Unmarshal(body, &v)
 	if v.Code != 0 && v.Code != 75500401 {
 		return fmt.Errorf("send SMS: code=%d %s", v.Code, v.Message)
 	}
@@ -337,17 +292,10 @@ func (s *Session) SmsVerify(authID string) error {
 	req.Header.Set("x-csrf-token", s.csrfToken)
 	req.Header.Set("x-sdp-traceid", randSdpID())
 
-	resp, err := s.client.Do(req)
+	v, err := doAPI[struct{}](s.client, req)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	rbody, _ := io.ReadAll(resp.Body)
-	var v struct {
-		Code int `json:"code"`
-	}
-	json.Unmarshal(rbody, &v)
 	if v.Code != 0 {
 		return fmt.Errorf("SMS verify failed: code=%d", v.Code)
 	}
@@ -364,19 +312,19 @@ func (s *Session) OnlineInfo() (string, error) {
 	req.Header.Set("x-csrf-token", s.csrfToken)
 	req.Header.Set("x-sdp-traceid", randSdpID())
 
-	resp, err := s.client.Do(req)
+	type responseData struct {
+		Username string `json:"username"`
+	}
+	v, err := doAPI[responseData](s.client, req)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var v struct {
-		Data struct {
-			Username string `json:"username"`
-		} `json:"data"`
+	if v.Code != 0 {
+		return "", fmt.Errorf("onlineInfo: code=%d %s", v.Code, v.Message)
 	}
-	json.Unmarshal(body, &v)
+	if v.Data.Username == "" {
+		return "", fmt.Errorf("onlineInfo: empty username")
+	}
 	return v.Data.Username, nil
 }
 
@@ -407,10 +355,8 @@ func (s *Session) Credentials() (*Credentials, error) {
 			sid = c.Value
 		}
 		out = append(out, shared.CookieJSON{
-			Host:   u.Host,
-			Scheme: "https",
-			Name:   c.Name,
-			Value:  c.Value,
+			Name:  c.Name,
+			Value: c.Value,
 		})
 	}
 
@@ -434,8 +380,6 @@ func (s *Session) Credentials() (*Credentials, error) {
 		Jar:       jar,
 	}, nil
 }
-
-// ── HTTP helpers ─────────────────────────────────────────────────────────────
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
@@ -462,11 +406,17 @@ func randSdpID() string {
 // EncryptPassword encrypts the password with the server's RSA public key.
 func (s *Session) EncryptPassword(password string) (string, error) {
 	N := new(big.Int)
-	N.SetString(s.pubKey, 16)
+	if _, ok := N.SetString(s.pubKey, 16); !ok || N.Sign() <= 0 {
+		return "", fmt.Errorf("invalid RSA modulus")
+	}
 
 	E := 65537
 	if s.pubKeyExp != "" {
-		E, _ = strconv.Atoi(s.pubKeyExp)
+		var err error
+		E, err = strconv.Atoi(s.pubKeyExp)
+		if err != nil || E < 2 {
+			return "", fmt.Errorf("invalid RSA exponent %q", s.pubKeyExp)
+		}
 	}
 
 	pub := &rsa.PublicKey{N: N, E: E}

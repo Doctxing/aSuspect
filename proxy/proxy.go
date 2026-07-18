@@ -96,7 +96,7 @@ func (p *Proxy) Serve() error {
 
 	server := socks5.NewServer(
 		socks5.WithAuthMethods(authMethods),
-		socks5.WithResolver(newSocks5Resolver(p.resolver)),
+		socks5.WithResolver(&socks5ResolverAdapter{r: p.resolver}),
 		socks5.WithDial(p.router.dial),
 		socks5.WithLogger(socks5.NewLogger(
 			log.New(os.Stdout, "[SOCKS5] ", log.LstdFlags),
@@ -154,10 +154,6 @@ func (p *Proxy) Serve() error {
 
 type socks5ResolverAdapter struct {
 	r *resolver
-}
-
-func newSocks5Resolver(r *resolver) *socks5ResolverAdapter {
-	return &socks5ResolverAdapter{r: r}
 }
 
 func (a *socks5ResolverAdapter) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {

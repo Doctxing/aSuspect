@@ -16,7 +16,6 @@ package l3tun
 import (
 	"fmt"
 	"net"
-	"sync/atomic"
 
 	"github.com/noisysockets/netstack/pkg/buffer"
 	"github.com/noisysockets/netstack/pkg/tcpip"
@@ -41,20 +40,17 @@ type gvisorStack struct {
 	// OnEgress is called synchronously from gVisor's WritePackets for each
 	// outbound raw IPv4 packet. Set by the L3 Runtime at initialization.
 	OnEgress func([]byte) error
-
-	closing atomic.Bool
 }
 
 // Stack is the L3 userspace network stack surface needed by upper layers.
 type Stack interface {
 	DialTCP(addr *net.TCPAddr) (net.Conn, error)
-	DialUDPConn(laddr, raddr *net.UDPAddr) (net.Conn, error)
+	DialUDP(laddr, raddr *net.UDPAddr) (net.Conn, error)
 }
 
 // endpoint is the virtual NIC that bridges gVisor ↔ L3 tunnel.
 type endpoint struct {
 	onEgress func([]byte) error
-	closing  func() bool
 
 	dispatcher stack.NetworkDispatcher
 }
@@ -63,10 +59,7 @@ type endpoint struct {
 func newGvisorStack(virtualIP net.IP) (*gvisorStack, error) {
 	s := &gvisorStack{}
 
-	s.endpoint = &endpoint{
-		closing: func() bool { return s.closing.Load() },
-		// onEgress is set below, once the gvisorStack is fully constructed.
-	}
+	s.endpoint = &endpoint{}
 	s.endpoint.onEgress = func(raw []byte) error {
 		if s.OnEgress != nil {
 			return s.OnEgress(raw)
@@ -149,7 +142,6 @@ func (s *gvisorStack) DeliverInbound(data []byte) {
 
 // Close shuts down the gVisor stack.
 func (s *gvisorStack) Close() {
-	s.closing.Store(true)
 	s.gs.Close()
 }
 
@@ -192,9 +184,3 @@ func (e *endpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Error) 
 	}
 	return list.Len(), nil
 }
-
-// DialUDPConn returns a gonet UDP conn backed by gVisor.
-func (s *gvisorStack) DialUDPConn(laddr, raddr *net.UDPAddr) (net.Conn, error) {
-	return s.DialUDP(laddr, raddr)
-}
-
