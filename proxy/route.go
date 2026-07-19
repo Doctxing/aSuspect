@@ -105,7 +105,7 @@ func (r *router) dialTCP(ctx context.Context, addr string) (net.Conn, error) {
 		if targetIP == nil {
 			return nil, fmt.Errorf("L3 TCP requires resolved IP address for %s", host)
 		}
-		return r.gstack.DialTCP(&net.TCPAddr{IP: targetIP, Port: port})
+		return r.gstack.DialTCP(&net.TCPAddr{IP: targetIP, Port: port}, appID, ngID)
 	default:
 		// TCP via L4 dedicated tunnel.
 		tunnelDomain := domain

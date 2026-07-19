@@ -108,62 +108,7 @@ func (g *InfoGatherer) parseResource(raw []byte, state *shared.SharedState) erro
 	appListData := v.Data.AppList.Data
 	for _, appGroup := range appListData.AppInfo {
 		for _, app := range appGroup.Apps {
-			for _, addr := range app.AddressList {
-				proto := addr.Protocol
-				if proto != "tcp" && proto != "udp" && proto != "all" {
-					continue
-				}
-				portMin, portMax, ok := parsePortRange(addr.Port)
-				if !ok {
-					continue
-				}
-				host := addr.Host
-
-				if ip := net.ParseIP(host); ip != nil {
-					if ip.To4() != nil {
-						state.IPResources = append(state.IPResources, shared.IPResource{
-							IPMin: ip, IPMax: ip,
-							PortMin: portMin, PortMax: portMax,
-							Protocol:    shared.Protocol(proto),
-							AppID:       app.ID,
-							NodeGroupID: app.NodeGroupID,
-						})
-					}
-				} else if strings.Contains(host, "/") {
-					_, ipNet, err := net.ParseCIDR(host)
-					if err == nil {
-						addCIDR(state, ipNet, portMin, portMax, shared.Protocol(proto), app.ID, app.NodeGroupID)
-					}
-				} else if strings.Contains(host, "-") {
-					parts := strings.SplitN(host, "-", 2)
-					minIP := net.ParseIP(parts[0])
-					maxIP := net.ParseIP(parts[1])
-					if minIP != nil && maxIP != nil && minIP.To4() != nil && maxIP.To4() != nil {
-						state.IPResources = append(state.IPResources, shared.IPResource{
-							IPMin: minIP, IPMax: maxIP,
-							PortMin: portMin, PortMax: portMax,
-							Protocol:    shared.Protocol(proto),
-							AppID:       app.ID,
-							NodeGroupID: app.NodeGroupID,
-						})
-					}
-				} else {
-					// Domain suffix.
-					suffix := strings.ToLower(strings.TrimSuffix(strings.ReplaceAll(host, "*", ""), "."))
-					state.DomainResources[suffix] = append(state.DomainResources[suffix], shared.DomainResource{
-						PortMin: portMin, PortMax: portMax,
-						Protocol:    shared.Protocol(proto),
-						AppID:       app.ID,
-						NodeGroupID: app.NodeGroupID,
-					})
-					for _, ipStr := range addr.IP {
-						if ip := net.ParseIP(ipStr); ip != nil && ip.To4() != nil {
-							state.StaticHosts[suffix] = ip
-							break
-						}
-					}
-				}
-			}
+			parseAppResources(state, app)
 		}
 	}
 
@@ -195,6 +140,7 @@ func (g *InfoGatherer) parseResource(raw []byte, state *shared.SharedState) erro
 	if state.DNSServer == nil && clientOpt.DNSOptionV2.FirstDNS != "" {
 		state.DNSServer = net.ParseIP(clientOpt.DNSOptionV2.FirstDNS)
 	}
+	state.FinalizeResources()
 
 	return nil
 }
@@ -221,16 +167,7 @@ type clientResourceResponse struct {
 
 type clientResourceAppList struct {
 	AppInfo []struct {
-		Apps []struct {
-			ID          string `json:"id"`
-			NodeGroupID string `json:"nodeGroupId"`
-			AddressList []struct {
-				Protocol string   `json:"protocol"`
-				Port     string   `json:"port"`
-				Host     string   `json:"host"`
-				IP       []string `json:"IP"`
-			} `json:"addressList"`
-		} `json:"apps"`
+		Apps []clientResourceApp `json:"apps"`
 	} `json:"appInfo"`
 	Config struct {
 		NodeGroupConf struct {
@@ -246,6 +183,223 @@ type clientResourceAppList struct {
 			} `json:"nodeGroupList"`
 		} `json:"nodeGroupConf"`
 	} `json:"config"`
+}
+
+type clientResourceApp struct {
+	ID                    string                  `json:"id"`
+	NodeGroupID           string                  `json:"nodeGroupId"`
+	AccessModel           string                  `json:"accessModel"`
+	AccessAddress         string                  `json:"accessAddress"`
+	AddrPretend           bool                    `json:"addrPretend"`
+	AddressList           []clientResourceAddress `json:"addressList"`
+	DomainList            []string                `json:"domainList"`
+	WebRelativeDomainList []string                `json:"webRelativeDomainList"`
+}
+
+type clientResourceAddress struct {
+	Protocol string   `json:"protocol"`
+	Port     string   `json:"port"`
+	Host     string   `json:"host"`
+	IP       []string `json:"ip"`
+}
+
+type routeTemplate struct {
+	protocol         shared.Protocol
+	portMin, portMax int
+}
+
+func parseAppResources(state *shared.SharedState, app clientResourceApp) {
+	if app.AccessModel != "" && app.AccessModel != "L3VPN" {
+		return
+	}
+
+	templates := make([]routeTemplate, 0, len(app.AddressList))
+	var exactIPs []net.IP
+	for _, addr := range app.AddressList {
+		template, ips, ok := parseResourceAddress(state, app, addr)
+		if !ok {
+			continue
+		}
+		templates = append(templates, template)
+		exactIPs = append(exactIPs, ips...)
+	}
+
+	for _, rawDomain := range app.DomainList {
+		if domain, ok := normalizeResourceDomain(rawDomain); ok {
+			addDomainTemplates(state, domain, templates, app)
+		}
+	}
+
+	entryDomains := parseEntryDomains(app.WebRelativeDomainList)
+	if len(entryDomains) == 0 {
+		entryDomains = parseEntryDomains([]string{app.AccessAddress})
+	}
+	for _, domain := range entryDomains {
+		addDomainTemplates(state, domain, templates, app)
+		if app.AddrPretend && len(state.StaticHosts[domain]) == 0 {
+			for _, ip := range exactIPs {
+				state.StaticHosts[domain] = append(state.StaticHosts[domain], copyIPv4(ip))
+			}
+		}
+	}
+}
+
+func parseResourceAddress(
+	state *shared.SharedState,
+	app clientResourceApp,
+	addr clientResourceAddress,
+) (routeTemplate, []net.IP, bool) {
+	if addr.Protocol != "tcp" && addr.Protocol != "udp" && addr.Protocol != "all" {
+		return routeTemplate{}, nil, false
+	}
+	portMin, portMax, ok := parsePortRange(addr.Port)
+	if !ok {
+		return routeTemplate{}, nil, false
+	}
+	template := routeTemplate{shared.Protocol(addr.Protocol), portMin, portMax}
+	host := strings.TrimSpace(addr.Host)
+
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			addIPRange(state, ip4, ip4, template, app)
+			return template, []net.IP{copyIPv4(ip4)}, true
+		}
+		return routeTemplate{}, nil, false
+	}
+	if _, ipNet, err := net.ParseCIDR(host); err == nil {
+		addCIDR(state, ipNet, portMin, portMax, template.protocol, app.ID, app.NodeGroupID)
+		return template, nil, true
+	}
+	if minIP, maxIP, ok := parseIPv4Range(host); ok {
+		addIPRange(state, minIP, maxIP, template, app)
+		return template, nil, true
+	}
+
+	domain, ok := normalizeResourceDomain(host)
+	if !ok {
+		return routeTemplate{}, nil, false
+	}
+	addDomainTemplates(state, domain, []routeTemplate{template}, app)
+
+	staticIPs := make([]net.IP, 0, len(addr.IP))
+	for _, rawIP := range addr.IP {
+		ip := net.ParseIP(rawIP).To4()
+		if ip == nil {
+			continue
+		}
+		ip = copyIPv4(ip)
+		state.StaticHosts[domain] = append(state.StaticHosts[domain], ip)
+		addIPRange(state, ip, ip, template, app)
+		staticIPs = append(staticIPs, ip)
+	}
+	return template, staticIPs, true
+}
+
+func addIPRange(state *shared.SharedState, minIP, maxIP net.IP, template routeTemplate, app clientResourceApp) {
+	state.IPResources = append(state.IPResources, shared.IPResource{
+		IPMin: copyIPv4(minIP), IPMax: copyIPv4(maxIP),
+		PortMin: template.portMin, PortMax: template.portMax,
+		Protocol: template.protocol, AppID: app.ID, NodeGroupID: app.NodeGroupID,
+	})
+}
+
+func addDomainTemplates(state *shared.SharedState, domain string, templates []routeTemplate, app clientResourceApp) {
+	for _, template := range templates {
+		state.DomainResources[domain] = append(state.DomainResources[domain], shared.DomainResource{
+			PortMin: template.portMin, PortMax: template.portMax,
+			Protocol: template.protocol, AppID: app.ID, NodeGroupID: app.NodeGroupID,
+		})
+	}
+}
+
+func parseIPv4Range(host string) (net.IP, net.IP, bool) {
+	parts := strings.Split(host, "-")
+	if len(parts) != 2 {
+		return nil, nil, false
+	}
+	minIP := net.ParseIP(strings.TrimSpace(parts[0])).To4()
+	maxIP := net.ParseIP(strings.TrimSpace(parts[1])).To4()
+	if minIP == nil || maxIP == nil || bytesCompareIPv4(minIP, maxIP) > 0 {
+		return nil, nil, false
+	}
+	return minIP, maxIP, true
+}
+
+func normalizeResourceDomain(raw string) (string, bool) {
+	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	wildcard := strings.HasPrefix(domain, "*.")
+	if wildcard {
+		domain = strings.TrimPrefix(domain, "*.")
+	}
+	if domain == "" || net.ParseIP(domain) != nil || !validDomain(domain) {
+		return "", false
+	}
+	if wildcard {
+		return "." + domain, true
+	}
+	return domain, true
+}
+
+func validDomain(domain string) bool {
+	if len(domain) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, ch := range label {
+			if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' && ch != '_' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func parseEntryDomains(values []string) []string {
+	seen := make(map[string]struct{})
+	var domains []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Hostname() == "" || net.ParseIP(parsed.Hostname()) != nil {
+			continue
+		}
+		domain, ok := normalizeResourceDomain(parsed.Hostname())
+		if !ok {
+			continue
+		}
+		if _, ok := seen[domain]; ok {
+			continue
+		}
+		seen[domain] = struct{}{}
+		domains = append(domains, domain)
+	}
+	return domains
+}
+
+func bytesCompareIPv4(a, b net.IP) int {
+	for i := 0; i < net.IPv4len; i++ {
+		if a[i] < b[i] {
+			return -1
+		}
+		if a[i] > b[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
+func copyIPv4(ip net.IP) net.IP {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil
+	}
+	return net.IPv4(ip4[0], ip4[1], ip4[2], ip4[3])
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

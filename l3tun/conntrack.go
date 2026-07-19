@@ -59,10 +59,10 @@ func newConntrackMgr() *conntrackMgr {
 	}
 }
 
-func connTrackKey(atyp uint8, srcIP net.IP, srcPort uint16,
-	dstIP net.IP, dstPort uint16) string {
-	return fmt.Sprintf("%d:%s:%d-%s:%d",
-		atyp, srcIP, srcPort, dstIP, dstPort)
+func connTrackKey(atyp, proto uint8, srcIP net.IP, srcPort uint16,
+	dstIP net.IP, dstPort uint16, appID string) string {
+	return fmt.Sprintf("%d:%d:%s:%d-%s:%d:%s",
+		atyp, proto, srcIP, srcPort, dstIP, dstPort, appID)
 }
 
 // ensureToken returns the connect token for a flow, triggering
@@ -75,7 +75,7 @@ func (m *conntrackMgr) ensureToken(
 	proto uint8,
 	appID string,
 ) (string, error) {
-	key := connTrackKey(atyp, srcIP, srcPort, dstIP, dstPort)
+	key := connTrackKey(atyp, proto, srcIP, srcPort, dstIP, dstPort, appID)
 
 	m.mu.Lock()
 	entry, exists := m.entries[key]

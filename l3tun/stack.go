@@ -14,8 +14,10 @@ package l3tun
 //	          → gVisor stack → gonet socket readable
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/noisysockets/netstack/pkg/buffer"
 	"github.com/noisysockets/netstack/pkg/tcpip"
@@ -25,6 +27,7 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/stack"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
+	"github.com/noisysockets/netstack/pkg/waiter"
 )
 
 const (
@@ -36,6 +39,7 @@ const (
 type gvisorStack struct {
 	gs       *stack.Stack
 	endpoint *endpoint
+	flows    sync.Map
 
 	// OnEgress is called synchronously from gVisor's WritePackets for each
 	// outbound raw IPv4 packet. Set by the L3 Runtime at initialization.
@@ -44,8 +48,18 @@ type gvisorStack struct {
 
 // Stack is the L3 userspace network stack surface needed by upper layers.
 type Stack interface {
-	DialTCP(addr *net.TCPAddr) (net.Conn, error)
+	DialTCP(addr *net.TCPAddr, appID, nodeGroupID string) (net.Conn, error)
 	DialUDP(laddr, raddr *net.UDPAddr) (net.Conn, error)
+}
+
+type flowRoute struct {
+	appID, nodeGroupID string
+}
+
+type flowRouteKey struct {
+	proto            uint8
+	srcPort, dstPort uint16
+	dstIP            [4]byte
 }
 
 // endpoint is the virtual NIC that bridges gVisor ↔ L3 tunnel.
@@ -104,13 +118,89 @@ func newGvisorStack(virtualIP net.IP) (*gvisorStack, error) {
 	return s, nil
 }
 
-// DialTCP creates a TCP connection through the gVisor stack → L3 tunnel.
-func (s *gvisorStack) DialTCP(addr *net.TCPAddr) (net.Conn, error) {
-	return gonet.DialTCP(s.gs, tcpip.FullAddress{
+// DialTCP binds the route before Connect emits the SYN, preserving the AppID
+// selected from the original SOCKS domain for L3 per-flow authentication.
+func (s *gvisorStack) DialTCP(addr *net.TCPAddr, appID, nodeGroupID string) (net.Conn, error) {
+	remote := tcpip.FullAddress{
 		NIC:  nicID,
 		Addr: tcpip.AddrFrom4Slice(addr.IP.To4()),
 		Port: uint16(addr.Port),
-	}, ipv4.ProtocolNumber)
+	}
+
+	var wq waiter.Queue
+	ep, tcpErr := s.gs.NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if tcpErr != nil {
+		return nil, errors.New(tcpErr.String())
+	}
+	if tcpErr = ep.Bind(tcpip.FullAddress{NIC: nicID}); tcpErr != nil {
+		ep.Close()
+		return nil, fmt.Errorf("bind L3 TCP endpoint: %s", tcpErr)
+	}
+	local, tcpErr := ep.GetLocalAddress()
+	if tcpErr != nil {
+		ep.Close()
+		return nil, fmt.Errorf("get L3 TCP address: %s", tcpErr)
+	}
+
+	key, ok := makeFlowRouteKey(6, local.Port, addr.IP, uint16(addr.Port))
+	if !ok {
+		ep.Close()
+		return nil, fmt.Errorf("L3 TCP requires IPv4 destination: %s", addr.IP)
+	}
+	s.flows.Store(key, flowRoute{appID: appID, nodeGroupID: nodeGroupID})
+	cleanup := func() { s.flows.Delete(key) }
+
+	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.WritableEvents)
+	wq.EventRegister(&waitEntry)
+	defer wq.EventUnregister(&waitEntry)
+
+	tcpErr = ep.Connect(remote)
+	if _, started := tcpErr.(*tcpip.ErrConnectStarted); started {
+		<-notifyCh
+		tcpErr = ep.LastError()
+	}
+	if tcpErr != nil {
+		cleanup()
+		ep.Close()
+		return nil, &net.OpError{Op: "connect", Net: "tcp", Addr: addr, Err: errors.New(tcpErr.String())}
+	}
+
+	return &routedTCPConn{TCPConn: gonet.NewTCPConn(&wq, ep), cleanup: cleanup}, nil
+}
+
+type routedTCPConn struct {
+	*gonet.TCPConn
+	cleanup func()
+	once    sync.Once
+}
+
+func (c *routedTCPConn) Close() error {
+	err := c.TCPConn.Close()
+	c.once.Do(c.cleanup)
+	return err
+}
+
+func (s *gvisorStack) findFlowRoute(packet parsedPacket) (flowRoute, bool) {
+	key, ok := makeFlowRouteKey(packet.Proto, packet.SrcPort, packet.DstIP, packet.DstPort)
+	if !ok {
+		return flowRoute{}, false
+	}
+	value, ok := s.flows.Load(key)
+	if !ok {
+		return flowRoute{}, false
+	}
+	return value.(flowRoute), true
+}
+
+func makeFlowRouteKey(proto uint8, srcPort uint16, dstIP net.IP, dstPort uint16) (flowRouteKey, bool) {
+	ip4 := dstIP.To4()
+	if ip4 == nil {
+		return flowRouteKey{}, false
+	}
+	return flowRouteKey{
+		proto: proto, srcPort: srcPort, dstPort: dstPort,
+		dstIP: [4]byte{ip4[0], ip4[1], ip4[2], ip4[3]},
+	}, true
 }
 
 // DialUDP creates a UDP socket through the gVisor stack → L3 tunnel.

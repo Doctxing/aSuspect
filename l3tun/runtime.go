@@ -129,7 +129,23 @@ func (r *Runtime) writeEgressPacket(rawPkt []byte, parsed parsedPacket) error {
 	snap := r.state.Snapshot()
 
 	proto := l3ResourceProto(parsed.Proto)
-	res := snap.FindIPResource(parsed.DstIP, proto, int(parsed.DstPort))
+	var res *shared.IPResource
+	if route, ok := r.stack.findFlowRoute(parsed); ok {
+		res = &shared.IPResource{
+			IPMin: parsed.DstIP, IPMax: parsed.DstIP,
+			PortMin: int(parsed.DstPort), PortMax: int(parsed.DstPort), Protocol: proto,
+			AppID: route.appID, NodeGroupID: route.nodeGroupID,
+		}
+	} else {
+		res = snap.FindIPResource(parsed.DstIP, proto, int(parsed.DstPort))
+	}
+	if res == nil && proto == shared.ProtoUDP && parsed.DstPort == 53 && parsed.DstIP.Equal(snap.DNSServer) {
+		res = &shared.IPResource{
+			IPMin: parsed.DstIP, IPMax: parsed.DstIP,
+			PortMin: 53, PortMax: 53, Protocol: shared.ProtoUDP,
+			NodeGroupID: snap.MajorGroupID,
+		}
+	}
 	if res == nil {
 		return fmt.Errorf("resource not found for %s:%d proto=%s",
 			parsed.DstIP, parsed.DstPort, proto)

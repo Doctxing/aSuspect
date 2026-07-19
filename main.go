@@ -75,7 +75,7 @@ func run(cfg *shared.Config) error {
 		return fmt.Errorf("gather resources: %w", err)
 	}
 
-	log.Printf("Resources: %d IP ranges, %d domain suffixes, %d static hosts",
+	log.Printf("Resources: %d IP ranges, %d domain routes, %d static DNS hosts",
 		len(state.IPResources), len(state.DomainResources), len(state.StaticHosts))
 
 	// ── 3. Start proxy ────────────────────────────────────────────────
