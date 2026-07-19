@@ -149,13 +149,13 @@ func (g *InfoGatherer) parseResource(raw []byte, state *shared.SharedState) erro
 					}
 				} else {
 					// Domain suffix.
-					suffix := strings.ReplaceAll(host, "*", "")
-					state.DomainResources[suffix] = shared.DomainResource{
+					suffix := strings.ToLower(strings.TrimSuffix(strings.ReplaceAll(host, "*", ""), "."))
+					state.DomainResources[suffix] = append(state.DomainResources[suffix], shared.DomainResource{
 						PortMin: portMin, PortMax: portMax,
 						Protocol:    shared.Protocol(proto),
 						AppID:       app.ID,
 						NodeGroupID: app.NodeGroupID,
-					}
+					})
 					for _, ipStr := range addr.IP {
 						if ip := net.ParseIP(ipStr); ip != nil && ip.To4() != nil {
 							state.StaticHosts[suffix] = ip
@@ -252,12 +252,12 @@ type clientResourceAppList struct {
 
 func parsePortRange(spec string) (int, int, bool) {
 	if parts := strings.SplitN(spec, "-", 2); len(parts) == 2 {
-		min, _ := strconv.Atoi(parts[0])
-		max, _ := strconv.Atoi(parts[1])
-		return min, max, true
+		min, minErr := strconv.Atoi(parts[0])
+		max, maxErr := strconv.Atoi(parts[1])
+		return min, max, minErr == nil && maxErr == nil && min >= 1 && max <= 65535 && min <= max
 	}
 	p, err := strconv.Atoi(spec)
-	return p, p, err == nil
+	return p, p, err == nil && p >= 1 && p <= 65535
 }
 
 func buildConnectionID(deviceID string) string {

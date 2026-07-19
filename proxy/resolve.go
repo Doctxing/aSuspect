@@ -53,7 +53,7 @@ func (r *resolver) resolve(domain string) (net.IP, error) {
 	snap := r.state.Snapshot()
 
 	// 1. Static hosts (server-pushed, most authoritative).
-	if ip, ok := snap.StaticHosts[domain]; ok {
+	if ip := snap.FindStaticHost(domain); ip != nil {
 		r.cache.Set(domain, ip, r.cacheTTL)
 		return ip, nil
 	}

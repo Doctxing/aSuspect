@@ -162,21 +162,11 @@ func (a *socks5ResolverAdapter) Resolve(ctx context.Context, name string) (conte
 		return ctx, nil, err
 	}
 
-	// Inject domain resource into context for the dialer.
-	snap := a.r.state.Snapshot()
-	for suffix, res := range snap.DomainResources {
-		if len(name) >= len(suffix) && name[len(name)-len(suffix):] == suffix {
-			ctx = context.WithValue(ctx, ctxKeyDomainResource, &res)
-			break
-		}
-	}
+	// Preserve the original domain after SOCKS replaces it with the resolved IP.
 	ctx = context.WithValue(ctx, ctxKeyResolveHost, name)
 	return ctx, ip, nil
 }
 
 type contextKey string
 
-var (
-	ctxKeyDomainResource contextKey = "DOMAIN_RESOURCE"
-	ctxKeyResolveHost    contextKey = "RESOLVE_HOST"
-)
+const ctxKeyResolveHost contextKey = "RESOLVE_HOST"

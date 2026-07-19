@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 
 	"aSuspect/l3tun"
 	"aSuspect/l4fast"
@@ -18,12 +17,6 @@ type router struct {
 	l4T     *l4fast.Tunnel
 	gstack  l3tun.Stack
 	tcpMode string // "l4" or "l3"
-}
-
-type routeContext struct {
-	domainResource *shared.DomainResource
-	ipResource     *shared.IPResource
-	useVPN         bool
 }
 
 func newRouter(
@@ -80,37 +73,26 @@ func (r *router) dialTCP(ctx context.Context, addr string) (net.Conn, error) {
 	snap := r.state.Snapshot()
 
 	// ── Resource matching ────────────────────────────────────────────
-	ctx2 := &routeContext{}
-
-	if res, ok := ctx.Value(ctxKeyDomainResource).(*shared.DomainResource); ok && res != nil {
-		ctx2.domainResource = res
-		ctx2.useVPN = res.Matches(shared.ProtoTCP, port)
-	}
-
-	if !ctx2.useVPN && domain != "" {
-		for suffix, res := range snap.DomainResources {
-			if strings.HasSuffix(domain, suffix) && res.Matches(shared.ProtoTCP, port) {
-				ctx2.domainResource = &res
-				ctx2.useVPN = true
-				break
-			}
+	var appID, ngID string
+	matched := false
+	if domain != "" {
+		if res := snap.FindDomainResource(domain, shared.ProtoTCP, port); res != nil {
+			appID, ngID, matched = res.AppID, res.NodeGroupID, true
 		}
 	}
 
-	if !ctx2.useVPN && targetIP != nil {
+	if !matched && targetIP != nil {
 		if res := snap.FindIPResource(targetIP, shared.ProtoTCP, port); res != nil {
-			ctx2.ipResource = res
-			ctx2.useVPN = true
+			appID, ngID, matched = res.AppID, res.NodeGroupID, true
 		}
 	}
 
 	// ── No resource match → drop ──────────────────────────────────
-	if !ctx2.useVPN {
+	if !matched {
 		return nil, fmt.Errorf("route: %s:%d does not match any aTrust resource — dropped", host, port)
 	}
 
 	// ── VPN: resolve app and node group ─────────────────────────────
-	appID, ngID := r.resolveAppAndGroup(ctx2)
 	nodeAddrs := snap.NodeCandidates(ngID)
 	if len(nodeAddrs) == 0 {
 		return nil, fmt.Errorf("no available node for group %q", ngID)
@@ -168,16 +150,6 @@ func (r *router) dialUDP(addr string) (net.Conn, error) {
 	}
 
 	return nil, fmt.Errorf("route: %s:%d does not match any aTrust resource", targetIP, port)
-}
-
-func (r *router) resolveAppAndGroup(ctx *routeContext) (string, string) {
-	if ctx.domainResource != nil {
-		return ctx.domainResource.AppID, ctx.domainResource.NodeGroupID
-	}
-	if ctx.ipResource != nil {
-		return ctx.ipResource.AppID, ctx.ipResource.NodeGroupID
-	}
-	return "", r.state.MajorGroupID
 }
 
 func parsePort(s string) (int, error) {

@@ -2,6 +2,7 @@ package shared
 
 import (
 	"net"
+	"strings"
 	"sync"
 )
 
@@ -19,8 +20,8 @@ type SharedState struct {
 	VirtualIP net.IP
 
 	IPResources     []IPResource
-	DomainResources map[string]DomainResource // suffix → resource
-	StaticHosts     map[string]net.IP         // domain → IP (server-pushed)
+	DomainResources map[string][]DomainResource // suffix → policies
+	StaticHosts     map[string]net.IP           // domain → IP (server-pushed)
 
 	DNSServer net.IP
 
@@ -36,7 +37,7 @@ type SharedState struct {
 // NewSharedState creates an empty SharedState.
 func NewSharedState() *SharedState {
 	return &SharedState{
-		DomainResources: make(map[string]DomainResource),
+		DomainResources: make(map[string][]DomainResource),
 		StaticHosts:     make(map[string]net.IP),
 		NodePool:        make(map[string][]string),
 	}
@@ -51,6 +52,32 @@ func (s *SharedState) FindIPResource(ip net.IP, proto Protocol, port int) *IPRes
 		}
 	}
 	return nil
+}
+
+// FindDomainResource returns the most specific matching domain policy.
+func (s *SharedState) FindDomainResource(domain string, proto Protocol, port int) *DomainResource {
+	domain = normalizeDomain(domain)
+	var best *DomainResource
+	bestLen := -1
+	for suffix, policies := range s.DomainResources {
+		suffix = normalizeDomain(suffix)
+		if len(suffix) <= bestLen || !matchesDomainSuffix(domain, suffix) {
+			continue
+		}
+		for i := range policies {
+			if policies[i].Matches(proto, port) {
+				best = &policies[i]
+				bestLen = len(suffix)
+				break
+			}
+		}
+	}
+	return best
+}
+
+// FindStaticHost returns an exact server-pushed address for domain.
+func (s *SharedState) FindStaticHost(domain string) net.IP {
+	return s.StaticHosts[normalizeDomain(domain)]
 }
 
 // NodeCandidates returns node addresses for groupID in server order,
@@ -84,4 +111,19 @@ func (s *SharedState) Snapshot() SharedState {
 		MajorGroupID: s.MajorGroupID,
 		AntiMITM:     s.AntiMITM,
 	}
+}
+
+func normalizeDomain(domain string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+}
+
+func matchesDomainSuffix(domain, suffix string) bool {
+	suffix = normalizeDomain(suffix)
+	if suffix == "" {
+		return false
+	}
+	if strings.HasPrefix(suffix, ".") {
+		return strings.HasSuffix(domain, suffix)
+	}
+	return domain == suffix || strings.HasSuffix(domain, "."+suffix)
 }
